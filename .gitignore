@@ -1,0 +1,14 @@
+# Datasets (large files)
+data/
+features.csv
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local environments / IDEs
+.vscode/
+.idea/
+.venv/
+env/
+venv/
