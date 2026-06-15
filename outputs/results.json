@@ -1,5 +1,32 @@
 {
-    "IsolationForest": {
+    "SingleFrame_RuleBased": {
+        "DoS": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1_score": 0.0
+        },
+        "Fuzzy": {
+            "precision": 0.5714285714285714,
+            "recall": 0.0006282393591958537,
+            "f1_score": 0.0012550988390335738
+        },
+        "Gear": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1_score": 0.0
+        },
+        "RPM": {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1_score": 0.0
+        },
+        "Overall": {
+            "precision": 0.5714285714285714,
+            "recall": 0.0001417133139658471,
+            "f1_score": 0.0002833563560372614
+        }
+    },
+    "SingleFrame_IsolationForest": {
         "DoS": {
             "precision": 0.4306663236429123,
             "recall": 0.4134354161521363,
@@ -26,7 +53,7 @@
             "f1_score": 0.29275051632637056
         }
     },
-    "Autoencoder": {
+    "SingleFrame_Autoencoder": {
         "DoS": {
             "precision": 0.37869401125115715,
             "recall": 0.6567053593479871,
@@ -53,31 +80,31 @@
             "f1_score": 0.5181962183947226
         }
     },
-    "RuleBasedBaseline": {
+    "WindowEnsemble_Consensus": {
         "DoS": {
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1_score": 0.0
+            "precision": 0.5042194092827004,
+            "recall": 0.25689716947330704,
+            "f1_score": 0.34037502967006883
         },
         "Fuzzy": {
-            "precision": 0.5714285714285714,
-            "recall": 0.0006282393591958537,
-            "f1_score": 0.0012550988390335738
+            "precision": 0.4040574809805579,
+            "recall": 0.20139035180113757,
+            "f1_score": 0.2688035990440039
         },
         "Gear": {
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1_score": 0.0
+            "precision": 0.07963446475195822,
+            "recall": 0.025102880658436213,
+            "f1_score": 0.038172715894868585
         },
         "RPM": {
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1_score": 0.0
+            "precision": 0.055592766242464835,
+            "recall": 0.016666666666666666,
+            "f1_score": 0.025644986868530822
         },
         "Overall": {
-            "precision": 0.5714285714285714,
-            "recall": 0.0001417133139658471,
-            "f1_score": 0.0002833563560372614
+            "precision": 0.6479400749063671,
+            "recall": 0.12866279934553027,
+            "f1_score": 0.21469347232563912
         }
     }
 }
