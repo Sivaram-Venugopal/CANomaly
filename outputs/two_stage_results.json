@@ -1,0 +1,27 @@
+{
+    "DoS": {
+        "single_stage_f1": 0.6512,
+        "two_stage_f1": 0.7304307763188206,
+        "improvement": 0.07923077631882058
+    },
+    "Fuzzy": {
+        "single_stage_f1": 0.0016,
+        "two_stage_f1": 0.5253687496174797,
+        "improvement": 0.5237687496174797
+    },
+    "Gear": {
+        "single_stage_f1": 0.6078,
+        "two_stage_f1": 0.704935064935065,
+        "improvement": 0.09713506493506496
+    },
+    "RPM": {
+        "single_stage_f1": 0.6273,
+        "two_stage_f1": 0.710676446617767,
+        "improvement": 0.083376446617767
+    },
+    "NormalClass": {
+        "single_stage_f1": 0.9562,
+        "two_stage_f1": 0.9766960489718153,
+        "improvement": 0.02049604897181523
+    }
+}

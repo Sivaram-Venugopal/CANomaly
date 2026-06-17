@@ -70,6 +70,29 @@ def process_file(attack_name, filename, sample_size=250000):
     # 3. DLC consistency per CAN ID (standard dev of DLC)
     df['dlc_consistency'] = df.groupby('CAN_ID')['DLC'].transform('std').fillna(0)
     
+    # 3b. Physical plausibility score (RPM and Gear Range Checks)
+    df['physical_plausibility_score'] = 0.0
+    
+    # RPM Plausibility Check (CAN ID 0316)
+    idx_316 = df['CAN_ID'] == '0316'
+    if idx_316.any():
+        b2 = df.loc[idx_316, 5].fillna('00').astype(str).apply(lambda x: int(x, 16) if x != '' and x != 'nan' else 0)
+        b3 = df.loc[idx_316, 6].fillna('00').astype(str).apply(lambda x: int(x, 16) if x != '' and x != 'nan' else 0)
+        rpm = b3 * 256 + b2
+        delta_rpm = rpm.diff().abs().fillna(0)
+        implausible_rpm = (delta_rpm > 400) | (rpm < 1500) | (rpm > 4000)
+        df.loc[idx_316, 'physical_plausibility_score'] = implausible_rpm.astype(float)
+        
+    # Gear Plausibility Check (CAN ID 043f)
+    idx_43f = df['CAN_ID'] == '043f'
+    if idx_43f.any():
+        b9 = df.loc[idx_43f, 9].fillna('00').astype(str).apply(lambda x: int(x, 16) if x != '' and x != 'nan' else 0)
+        invalid_range = (b9 < 7) | (b9 > 13)
+        delta_gear = b9.diff().abs().fillna(0)
+        implausible_gear_change = delta_gear > 1
+        implausible_gear = invalid_range | implausible_gear_change
+        df.loc[idx_43f, 'physical_plausibility_score'] = implausible_gear.astype(float)
+    
     # Stratified downsampling to preserve R/T ratio
     normal_df = df[df['Flag'] == 'R']
     attack_df = df[df['Flag'] == 'T']
@@ -122,7 +145,7 @@ def process_file(attack_name, filename, sample_size=250000):
     # Keep only the necessary columns to save features.csv disk size and memory
     # Keep Timestamp, CAN_ID, DLC and payload bytes (3..10) for the Streamlit dashboard simulation
     cols_to_keep = ['Timestamp', 'CAN_ID', 'DLC', 3, 4, 5, 6, 7, 8, 9, 10, 
-                    'delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency', 'Flag', 'Attack_Type', 'Label']
+                    'delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency', 'physical_plausibility_score', 'Flag', 'Attack_Type', 'Label']
     # Filter columns that exist
     cols_to_keep = [c for c in cols_to_keep if c in sampled_df.columns]
     

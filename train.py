@@ -17,15 +17,15 @@ FEATURES_CSV = "D:/Tata Innovent/CANomaly/features.csv"
 MODELS_DIR = "D:/Tata Innovent/CANomaly/models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-# 4 features to use
-FEATURES = ['delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency']
+# 5 features to use
+FEATURES = ['delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency', 'physical_plausibility_score']
 
 # PyTorch Autoencoder Architecture
 class AnomalyAutoencoder(nn.Module):
     def __init__(self):
         super(AnomalyAutoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(4, 8),
+            nn.Linear(5, 8),
             nn.ReLU(),
             nn.Linear(8, 4),
             nn.ReLU()
@@ -33,7 +33,7 @@ class AnomalyAutoencoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(4, 8),
             nn.ReLU(),
-            nn.Linear(8, 4)
+            nn.Linear(8, 5)
         )
         
     def forward(self, x):
