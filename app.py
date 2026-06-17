@@ -10,7 +10,7 @@ import json
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 
-FEATURES = ['delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency']
+FEATURES = ['delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency', 'physical_plausibility_score']
 FEATURE_NAMES = [
     'delta_t', 
     'can_id_freq', 
@@ -93,7 +93,7 @@ class AnomalyAutoencoder(nn.Module):
     def __init__(self):
         super(AnomalyAutoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(4, 8),
+            nn.Linear(5, 8),
             nn.ReLU(),
             nn.Linear(8, 4),
             nn.ReLU()
@@ -101,7 +101,7 @@ class AnomalyAutoencoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(4, 8),
             nn.ReLU(),
-            nn.Linear(8, 4)
+            nn.Linear(8, 5)
         )
         
     def forward(self, x):
@@ -636,7 +636,26 @@ if classify_manual:
                 counts[b] = counts.get(b, 0) + 1
             entropy = -sum((c / dlc) * np.log2(c / dlc) for c in counts.values()) if dlc > 0 else 0.0
             
-            feat_vector = np.array([[dt, freq, entropy, dlc_std]])
+            # Calculate physical plausibility score for manual mode
+            plausibility_score = 0.0
+            if can_id == '0316' and len(bytes_list) >= 4:
+                try:
+                    b2 = int(bytes_list[2], 16)
+                    b3 = int(bytes_list[3], 16)
+                    rpm = b3 * 256 + b2
+                    if rpm < 1500 or rpm > 4000:
+                        plausibility_score = 1.0
+                except (ValueError, IndexError):
+                    pass
+            elif can_id == '043f' and len(bytes_list) >= 7:
+                try:
+                    b9 = int(bytes_list[6], 16)
+                    if b9 < 7 or b9 > 13:
+                        plausibility_score = 1.0
+                except (ValueError, IndexError):
+                    pass
+            
+            feat_vector = np.array([[dt, freq, entropy, dlc_std, plausibility_score]])
             feat_scaled = scaler.transform(feat_vector)
             
             is_anomaly = False
