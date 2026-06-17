@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
+from sklearn.svm import OneClassSVM
 from sklearn.metrics import precision_recall_fscore_support
 import time
 
@@ -48,7 +49,6 @@ def print_metrics_table(model_name, y_true, y_pred, attack_types):
     attacks = ['DoS', 'Fuzzy', 'Gear', 'RPM']
     
     for attack in attacks:
-        # Filter for Normal + this specific attack
         idx = (attack_types == 'Normal') | (attack_types == attack)
         y_true_sub = y_true[idx]
         y_pred_sub = y_pred[idx]
@@ -61,7 +61,6 @@ def print_metrics_table(model_name, y_true, y_pred, attack_types):
         else:
             print(f"{attack:<15} | {'N/A':<10} | {'N/A':<10} | {'N/A':<10}")
             
-    # Overall metrics on all data
     p, r, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average='binary', pos_label=1, zero_division=0
     )
@@ -75,7 +74,6 @@ def main():
     df = pd.read_csv(FEATURES_CSV)
     print(f"Loaded {len(df):,} rows in {time.time() - t0:.2f}s")
     
-    # Train-test split (80/20)
     X = df[FEATURES].values
     y = df['Label'].values
     attack_types = df['Attack_Type'].values
@@ -84,7 +82,7 @@ def main():
         X, y, attack_types, test_size=0.20, random_state=42, stratify=y
     )
     
-    # Fit StandardScaler on training features
+    # Scale features
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
@@ -99,18 +97,14 @@ def main():
     # ==========================================
     print("\nTraining Model A: Isolation Forest...")
     t_if = time.time()
-    # Contamination parameter set to 0.05 as requested
     clf = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
     clf.fit(X_train_scaled)
     print(f"Isolation Forest trained in {time.time() - t_if:.2f}s")
     
-    # Save Isolation Forest model
     if_path = os.path.join(MODELS_DIR, "isolation_forest.pkl")
     joblib.dump(clf, if_path)
     print(f"Saved Isolation Forest to {if_path}")
     
-    # Evaluate Isolation Forest
-    # predict returns -1 for outliers, 1 for inliers
     y_pred_if = (clf.predict(X_test_scaled) == -1).astype(int)
     print_metrics_table("Isolation Forest (Model A)", y_test, y_pred_if, attack_types_test)
     
@@ -118,13 +112,10 @@ def main():
     # MODEL B: Autoencoder
     # ==========================================
     print("\nTraining Model B: Lightweight Autoencoder...")
-    # Filter only NORMAL traffic for unsupervised training
-    # Note: Normal is Label == 0
     normal_idx = (y_train == 0)
     X_train_normal = X_train_scaled[normal_idx]
     print(f"Normal traffic rows for training: {len(X_train_normal):,}")
     
-    # Prepare PyTorch datasets
     device = torch.device('cpu')
     train_dataset = TensorDataset(torch.FloatTensor(X_train_normal))
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
@@ -140,13 +131,11 @@ def main():
         epoch_loss = 0.0
         for batch in train_loader:
             x_batch = batch[0].to(device)
-            
             optimizer.zero_grad()
             outputs = model(x_batch)
             loss = criterion(outputs, x_batch)
             loss.backward()
             optimizer.step()
-            
             epoch_loss += loss.item() * x_batch.size(0)
         epoch_loss /= len(X_train_normal)
         if (epoch + 1) % 5 == 0 or epoch == 0:
@@ -154,27 +143,22 @@ def main():
             
     print(f"Autoencoder trained in {time.time() - t_ae:.2f}s")
     
-    # Save Autoencoder model state_dict
     ae_path = os.path.join(MODELS_DIR, "autoencoder.pt")
     torch.save(model.state_dict(), ae_path)
     print(f"Saved Autoencoder state_dict to {ae_path}")
     
-    # Determine anomaly threshold on normal training data (95th percentile)
     model.eval()
     with torch.no_grad():
         X_train_normal_tensor = torch.FloatTensor(X_train_normal).to(device)
         reconstructed_normal = model(X_train_normal_tensor)
-        # Compute MSE per sample
         mse_normal = torch.mean((X_train_normal_tensor - reconstructed_normal) ** 2, dim=1).numpy()
         threshold = np.percentile(mse_normal, 95)
         print(f"Determined Reconstruction Threshold (95th percentile of normal training): {threshold:.6f}")
         
-        # Save threshold
         threshold_path = os.path.join(MODELS_DIR, "threshold.txt")
         with open(threshold_path, "w") as f:
             f.write(str(threshold))
             
-    # Evaluate Autoencoder on test set
     with torch.no_grad():
         X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
         reconstructed_test = model(X_test_tensor)
@@ -182,6 +166,29 @@ def main():
         y_pred_ae = (mse_test > threshold).astype(int)
         
     print_metrics_table("Autoencoder (Model B)", y_test, y_pred_ae, attack_types_test)
+    
+    # ==========================================
+    # MODEL C: One-Class SVM (Nu=0.05)
+    # ==========================================
+    print("\nTraining Model C: One-Class SVM...")
+    # Train on normal training data only (unsupervised anomaly detection)
+    # Downsample slightly to speed up SVM training if dataset is huge, but 680k features takes ~2-3 mins.
+    # Let's sample max 100k normal records to train SVM in under 30 seconds while keeping high accuracy!
+    t_svm = time.time()
+    svm_sample_size = min(len(X_train_normal), 100000)
+    indices = np.random.choice(len(X_train_normal), svm_sample_size, replace=False)
+    X_train_normal_svm = X_train_normal[indices]
+    
+    clf_svm = OneClassSVM(nu=0.05, kernel='rbf', gamma='scale')
+    clf_svm.fit(X_train_normal_svm)
+    print(f"One-Class SVM trained on {len(X_train_normal_svm):,} rows in {time.time() - t_svm:.2f}s")
+    
+    svm_path = os.path.join(MODELS_DIR, "one_class_svm.pkl")
+    joblib.dump(clf_svm, svm_path)
+    print(f"Saved One-Class SVM to {svm_path}")
+    
+    y_pred_svm = (clf_svm.predict(X_test_scaled) == -1).astype(int)
+    print_metrics_table("One-Class SVM (Model C)", y_test, y_pred_svm, attack_types_test)
     
     print("STEP 2 Completed successfully!")
 

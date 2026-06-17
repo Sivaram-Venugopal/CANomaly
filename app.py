@@ -130,10 +130,16 @@ def load_models_and_scaler():
 
 @st.cache_data
 def load_simulation_data():
+    replay_path = "D:/Tata Innovent/CANomaly/outputs/replay_stream.csv"
+    if os.path.exists(replay_path):
+        df_sim = pd.read_csv(replay_path)
+        # Standardize column names for simulator compatibility
+        df_sim.rename(columns={'can_id': 'CAN_ID', 'injected_attack_type': 'Attack_Type'}, inplace=True)
+    else:
+        df = pd.read_csv(FEATURES_CSV)
+        df_sim = df.sample(n=500, random_state=42).sort_values(by='Timestamp').copy()
+        
     df = pd.read_csv(FEATURES_CSV)
-    # Replay 500 sorted by Timestamp to keep chronological order
-    df_sim = df.sample(n=500, random_state=42).sort_values(by='Timestamp').copy()
-    
     # Stats for manual mode
     id_freqs = df.groupby('CAN_ID')['can_id_freq'].mean().to_dict()
     id_dlc_stds = df.groupby('CAN_ID')['dlc_consistency'].mean().to_dict()
@@ -144,6 +150,20 @@ def load_simulation_data():
 try:
     scaler, clf, ae_model, ae_threshold, normal_stats = load_models_and_scaler()
     df_sim, id_freqs, id_dlc_stds, avg_delta_t = load_simulation_data()
+    
+    # Import AdaptiveThreshold
+    from adaptive_threshold import AdaptiveThreshold
+    
+    # Load tracker state into session state
+    if 'tracker' not in st.session_state:
+        tracker_path = os.path.join(MODELS_DIR, "adaptive_threshold.pkl")
+        if os.path.exists(tracker_path):
+            try:
+                st.session_state.tracker = joblib.load(tracker_path)
+            except Exception:
+                st.session_state.tracker = AdaptiveThreshold(alpha=0.05, sigma=3.0, warmup_frames=50)
+        else:
+            st.session_state.tracker = AdaptiveThreshold(alpha=0.05, sigma=3.0, warmup_frames=50)
 except Exception as e:
     st.error(f"Error loading models or data: {e}. Run step 1, 2, and 3 first.")
     st.stop()
@@ -164,6 +184,16 @@ detection_mode = st.sidebar.radio(
     "Detection Mode:",
     ("Single-frame", "Window ensemble")
 )
+
+use_adaptive_threshold = False
+if selected_model_name == "Lightweight Autoencoder":
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Adaptive Baselines")
+    use_adaptive_threshold = st.sidebar.toggle(
+        "Adaptive threshold mode", 
+        value=False,
+        help="Self-calibrates the Autoencoder anomaly threshold per CAN ID in real time."
+    )
 
 st.sidebar.markdown("""
 ---
@@ -190,6 +220,8 @@ with col_main:
         stop_sim = st.button("⏹ Reset")
         if stop_sim:
             st.session_state.xai_data = None
+            if 'tracker' in st.session_state:
+                del st.session_state.tracker
             st.rerun()
         
     chart_placeholder = st.empty()
@@ -207,10 +239,19 @@ with col_stats:
     attacks_placeholder = st.metric("Attacks Detected", "0", delta_color="inverse")
     fp_placeholder = st.metric("False Positives", "0", delta_color="inverse")
     
+    # Adaptive baselines learned card
+    baselines_placeholder = st.empty()
+    if use_adaptive_threshold:
+        num_baselines = len(st.session_state.tracker.ema_mean)
+        baselines_placeholder.metric("Adaptive Baselines Learned", f"{num_baselines}")
+    
     st.markdown("---")
     st.markdown("**Thresholds & Settings:**")
     if selected_model_name == "Lightweight Autoencoder":
-        st.info(f"Model: Unsupervised AE\nThreshold: {ae_threshold:.6f}")
+        if use_adaptive_threshold:
+            st.info(f"Model: Unsupervised AE\nThreshold: Adaptive (Self-Calibrated)")
+        else:
+            st.info(f"Model: Unsupervised AE\nThreshold: {ae_threshold:.6f}")
     else:
         st.info(f"Model: Isolation Forest\nContamination: 0.05")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -267,6 +308,7 @@ if start_sim:
     plot_x = []
     plot_y = []
     plot_colors = []
+    plot_thresh = []
     
     # Stream logs
     stream_logs = []
@@ -275,7 +317,7 @@ if start_sim:
     current_window_id = None
     window_buffer = []
     
-    for i in range(500):
+    for i in range(len(df_sim)):
         # Frame metadata
         frame_scaled = X_sim_scaled[i].reshape(1, -1)
         true_label = y_sim_true[i]
@@ -294,7 +336,19 @@ if start_sim:
             frame_tensor = torch.FloatTensor(frame_scaled)
             output = ae_model(frame_tensor)
             ae_score = torch.mean((frame_tensor - output) ** 2).item()
-            ae_pred = 1 if ae_score > ae_threshold else 0
+            
+            if use_adaptive_threshold:
+                # Update EMA only if normal frame (true_label == 0) or during warmup
+                is_training = (true_label == 0)
+                ae_pred = 1 if st.session_state.tracker.is_anomaly(can_id, ae_score, is_training=is_training) else 0
+                
+                # Dynamically track threshold for plotting
+                mean_val = st.session_state.tracker.ema_mean.get(can_id, ae_score)
+                std_val = (st.session_state.tracker.ema_var.get(can_id, 0.0) ** 0.5)
+                thresh_val = mean_val + 3.0 * std_val
+                plot_thresh.append(thresh_val)
+            else:
+                ae_pred = 1 if ae_score > ae_threshold else 0
             
         # Isolation Forest
         if_score = -clf.score_samples(frame_scaled)[0]
@@ -447,14 +501,24 @@ if start_sim:
         total_placeholder.metric("Total Processed", f"{total_frames}")
         attacks_placeholder.metric("Attacks Detected", f"{attacks_detected}")
         fp_placeholder.metric("False Positives", f"{false_positives}")
+        if use_adaptive_threshold:
+            baselines_placeholder.metric("Adaptive Baselines Learned", f"{len(st.session_state.tracker.ema_mean)}")
         
         # Render Plotly Chart
         fig = go.Figure()
         if detection_mode == "Single-frame":
-            thresh = ae_threshold if selected_model_name == "Lightweight Autoencoder" else 0.5
             fig.add_trace(go.Scatter(x=plot_x, y=plot_y, mode='lines', name='Anomaly Score', line=dict(color='#00d2ff', width=1.5)))
+            
+            # Decide threshold to use for plotting anomaly markers
+            if use_adaptive_threshold and selected_model_name == "Lightweight Autoencoder":
+                fig.add_trace(go.Scatter(x=plot_x, y=plot_thresh, mode='lines', name='Adaptive Threshold', line=dict(color='orange', width=1.5, dash='dash')))
+                anomaly_indices = [idx for idx, val in enumerate(plot_y) if (val > plot_thresh[idx])]
+            else:
+                thresh = ae_threshold if selected_model_name == "Lightweight Autoencoder" else 0.5
+                fig.add_hline(y=thresh, line_dash="dash", line_color="red", annotation_text="Threshold")
+                anomaly_indices = [idx for idx, val in enumerate(plot_y) if (val > thresh)]
+                
             # Add anomaly markers
-            anomaly_indices = [idx for idx, val in enumerate(plot_y) if (val > thresh)]
             if anomaly_indices:
                 fig.add_trace(go.Scatter(
                     x=[plot_x[idx] for idx in anomaly_indices],
@@ -463,7 +527,6 @@ if start_sim:
                     name='Flagged Anomaly',
                     marker=dict(color='red', size=6)
                 ))
-            fig.add_hline(y=thresh, line_dash="dash", line_color="red", annotation_text="Threshold")
             fig.update_layout(
                 margin=dict(l=10, r=10, t=10, b=10),
                 paper_bgcolor='#0d1117',
@@ -585,8 +648,14 @@ if classify_manual:
                     frame_tensor = torch.FloatTensor(feat_scaled)
                     output = ae_model(frame_tensor)
                     score = torch.mean((frame_tensor - output) ** 2).item()
-                thresh = ae_threshold
-                is_anomaly = score > thresh
+                if use_adaptive_threshold:
+                    is_anomaly = st.session_state.tracker.is_anomaly(can_id, score, is_training=False)
+                    mean_val = st.session_state.tracker.ema_mean[can_id]
+                    std_val = (st.session_state.tracker.ema_var[can_id] ** 0.5)
+                    thresh = mean_val + 3.0 * std_val
+                else:
+                    thresh = ae_threshold
+                    is_anomaly = score > thresh
             else:
                 score = -clf.score_samples(feat_scaled)[0]
                 is_anomaly = clf.predict(feat_scaled)[0] == -1
