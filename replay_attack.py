@@ -13,15 +13,15 @@ MODELS_DIR = "D:/Tata Innovent/CANomaly/models"
 OUTPUTS_DIR = "D:/Tata Innovent/CANomaly/outputs"
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-# 4 features
-FEATURES = ['delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency']
+# 5 features to match the trained model
+FEATURES = ['delta_t', 'can_id_freq', 'payload_entropy', 'dlc_consistency', 'physical_plausibility_score']
 
 # PyTorch Autoencoder Architecture
 class AnomalyAutoencoder(nn.Module):
     def __init__(self):
         super(AnomalyAutoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(4, 8),
+            nn.Linear(5, 8),
             nn.ReLU(),
             nn.Linear(8, 4),
             nn.ReLU()
@@ -29,7 +29,7 @@ class AnomalyAutoencoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(4, 8),
             nn.ReLU(),
-            nn.Linear(8, 4)
+            nn.Linear(8, 5)
         )
         
     def forward(self, x):
@@ -113,6 +113,35 @@ def main():
         for idx, p in enumerate(rpm_payload):
             frame[str(idx+3)] = p
         rpm_frames.append(frame)
+
+    # Create 50 UDS Reflash frames (Frame 1900 to 1949)
+    print("Creating 50 UDS Reflash frames (SUMS-relevant)...")
+    uds_frames = []
+    # SIDs: 0x10 (DiagnosticSessionControl), 0x34 (RequestDownload), 0x36 (TransferData), 0x37 (RequestTransferExit)
+    for i in range(50):
+        if i < 5:
+            sid = "10"
+        elif i < 10:
+            sid = "34"
+        elif i < 45:
+            sid = "36"
+        else:
+            sid = "37"
+            
+        frame = {
+            'Timestamp': 0,
+            'CAN_ID': '7E0',
+            'DLC': 8,
+            'Flag': 'T',
+            'Label': 1,
+            'Attack_Type': 'UDS_Reflash',
+            'injected_attack_type': 'UDS_Reflash'
+        }
+        frame['3'] = "02"  # PCI length
+        frame['4'] = sid   # UDS Service ID
+        for idx in range(2, 8):
+            frame[str(idx+3)] = "00"
+        uds_frames.append(frame)
         
     # Standardize normal frames keys
     for f in normal_frames:
@@ -125,7 +154,9 @@ def main():
     # 1400 to 1430: Fuzzy (30 frames)
     # 1430 to 1700: Normal (270 frames)
     # 1700 to 1720: RPM Spoofing (20 frames)
-    # 1720 to 2100: Normal (380 frames)
+    # 1720 to 1900: Normal (180 frames) -> split normal_frames[1620:1800]
+    # 1900 to 1950: UDS Reflash (50 frames)
+    # 1950 to 2150: Normal (200 frames) -> split normal_frames[1800:]
     combined = (
         normal_frames[:800] + 
         dos_frames + 
@@ -133,7 +164,9 @@ def main():
         fuzzy_frames + 
         normal_frames[1350:1620] + 
         rpm_frames + 
-        normal_frames[1620:]
+        normal_frames[1620:1800] +
+        uds_frames +
+        normal_frames[1800:]
     )
     
     df_replay = pd.DataFrame(combined)
@@ -148,17 +181,24 @@ def main():
             current_ts += 0.00010 # high frequency Fuzzy
         elif attack == 'RPM_Spoofing':
             current_ts += 0.03000 # 3x normal interval
+        elif attack == 'UDS_Reflash':
+            current_ts += 0.00020 # high frequency UDS Reflash
         else:
             current_ts += 0.00030 # average normal interval
         timestamps.append(current_ts)
         
     df_replay['Timestamp'] = timestamps
     
-    # Re-calculate 4 core features
+    # Re-calculate 5 core features
     df_replay['delta_t'] = df_replay['Timestamp'].diff().fillna(0)
     df_replay['window'] = df_replay['Timestamp'] // 0.1
     df_replay['can_id_freq'] = df_replay.groupby(['window', 'CAN_ID'])['CAN_ID'].transform('count')
     df_replay['dlc_consistency'] = df_replay.groupby('CAN_ID')['DLC'].transform('std').fillna(0)
+    # Ensure physical_plausibility_score is filled for injected frames
+    if 'physical_plausibility_score' in df_replay.columns:
+        df_replay['physical_plausibility_score'] = df_replay['physical_plausibility_score'].fillna(0.0)
+    else:
+        df_replay['physical_plausibility_score'] = 0.0
     
     # Calculate payload entropy
     payload_cols = ['3', '4', '5', '6', '7', '8', '9', '10']
@@ -207,8 +247,7 @@ def main():
     # Frame prediction = average of the 3 model predictions
     frame_predictions = (y_pred_if + y_pred_ae + y_pred_svm) / 3.0
     
-    # Run sliding window ensemble (W=55, stride=10) on the replay stream
-    # Prompt says: Run sliding window ensemble (W=50, stride=10)
+    # Run sliding window ensemble (W=50, stride=10) on the replay stream
     W = 50
     stride = 10
     
@@ -237,6 +276,11 @@ def main():
     scores_df.to_csv(os.path.join(OUTPUTS_DIR, "replay_scores.csv"), index=False)
     print(f"Saved sliding window scores to outputs/replay_scores.csv")
     
+    # Run SUMS-aligned check
+    print("\nRunning SUMS reflash verification on stream...")
+    from sums_check import scan_stream_for_uds_anomalies
+    scan_stream_for_uds_anomalies(df_replay, maintenance_window_active=False)
+    
     # Step 3: Plot the spike chart (replay_attack_spike.png)
     print("Plotting attack replay spike chart...")
     plt.figure(figsize=(12, 6))
@@ -255,13 +299,15 @@ def main():
     plt.axvspan(800, 850, color='red', alpha=0.15, label='DoS Injection Zone')
     plt.axvspan(1400, 1430, color='orange', alpha=0.15, label='Fuzzy Injection Zone')
     plt.axvspan(1700, 1720, color='purple', alpha=0.15, label='RPM Spoofing Injection Zone')
+    plt.axvspan(1900, 1950, color='brown', alpha=0.15, label='Unauthorized Reflash (SUMS)')
     
     # Annotations
     plt.text(825, 0.92, 'DoS Injected\n(Frame 800)', color='#d62728', fontsize=10, fontweight='bold', ha='center')
     plt.text(1415, 0.92, 'Fuzzy Injected\n(Frame 1400)', color='#ff7f0e', fontsize=10, fontweight='bold', ha='center')
     plt.text(1710, 0.92, 'RPM Spoofing Injected\n(Frame 1700)', color='purple', fontsize=10, fontweight='bold', ha='center')
+    plt.text(1925, 0.92, 'Reflash (SUMS)\n(Frame 1900)', color='brown', fontsize=10, fontweight='bold', ha='center')
     
-    plt.xlim(0, 2100)
+    plt.xlim(0, 2200)
     plt.ylim(-0.05, 1.05)
     plt.xlabel('Frame Index', fontsize=12, fontweight='bold')
     plt.ylabel('Ensemble Anomaly Score', fontsize=12, fontweight='bold')
@@ -281,10 +327,10 @@ def main():
     df_replay.to_csv(replay_stream_path, index=False)
     
     # Step 4: README section console output
-    # Find max scores in each attack zone to display in README table
     dos_spike = max([r['ensemble_score'] for r in scores_records if r['start_frame'] >= 780 and r['end_frame'] <= 870])
     fuzzy_spike = max([r['ensemble_score'] for r in scores_records if r['start_frame'] >= 1380 and r['end_frame'] <= 1450])
     rpm_spike = max([r['ensemble_score'] for r in scores_records if r['start_frame'] >= 1680 and r['end_frame'] <= 1740])
+    reflash_spike = max([r['ensemble_score'] for r in scores_records if r['start_frame'] >= 1880 and r['end_frame'] <= 1970])
     
     print("\n" + "="*50)
     print(" COPY-PASTE THIS BLOCK INTO YOUR GITHUB README.md")
@@ -292,7 +338,7 @@ def main():
     
     readme_block = f"""## Live attack replay demo
 The chart below shows CANomaly's ensemble anomaly score (0–1) on a
-2,000-frame CAN stream with three injected attacks.
+2,150-frame CAN stream with four injected attacks/anomalies (including SUMS reflash).
 
 ![Attack Replay Spike Chart](outputs/replay_attack_spike.png)
 
@@ -301,11 +347,13 @@ The chart below shows CANomaly's ensemble anomaly score (0–1) on a
 | Frame 800 | DoS | > {dos_spike:.2f} |
 | Frame 1400 | Fuzzy | > {fuzzy_spike:.2f} |
 | Frame 1700 | RPM Spoofing | > {rpm_spike:.2f} |
+| Frame 1900 | UDS Reflash (SUMS) | > {reflash_spike:.2f} |
 
-Detection threshold: 0.5. All three attacks detected within one window (50 frames)."""
+Detection threshold: 0.5. All four attacks/anomalies detected within one window (50 frames)."""
     
     print(readme_block)
     print("\n" + "="*50 + "\n")
 
 if __name__ == "__main__":
     main()
+
